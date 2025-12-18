@@ -15,15 +15,15 @@ import queue
 from D_model_train import CustomDeepONet
 from pathlib import Path
 
-data_dir = Path(r'D:\Users\MXY\PycharmProjects\data\t1s1')
+data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
 ############################################
 # 1. 加载 PyTorch 模型
 ############################################
 # 注意：必须是 torch.save(model) 保存的方式
-model_path = "data/final_model.pt"
-config_path= "data/config.json"
-trunk_net_path= "data/sampled_trunk_net.csv"
-nodes_path= "data/sampled_nodes.csv"
+model_path = data_dir/"final_model.pt"
+config_path= data_dir/"config.json"
+trunk_net_path= data_dir/"t1s1/sampled_trunk_net.csv"
+nodes_path=data_dir/ "t1s1/sampled_nodes.csv"
 
 
 
@@ -107,13 +107,9 @@ def compute_heat_flux_realtime(nodes, params):
 ############################################
 # 5. 输入模型推理
 ############################################
-def run_inference(branch_input,config_path="config.json",model_path = "final_model.pt"):
+def run_inference(branch_input, config_path="config.json", model_path="final_model.pt"):
     """
-    exp_dir: 实验文件夹路径 (包含 final_model.pt, config.json)
-    branch_input: 1D numpy array, shape = [branch_dim]
-
-    return:
-        y_pred: shape = [num_nodes, 1]
+    执行模型推理 (修复了读取 config.json 中字符串格式数组报错的问题)
     """
 
     # ---------------------------------------------------------
@@ -130,17 +126,24 @@ def run_inference(branch_input,config_path="config.json",model_path = "final_mod
     output_activation = cfg["output_activation"]
     is_bias = cfg["is_bias"]
     scaling_method = cfg["scaling_method"]
-    isPCA = cfg["isPCA"]
-    pca_dim = cfg["pca_dim"]
+
+    # --- [新增] 辅助函数：解析可能是字符串格式的数组 ---
+    def parse_config_value(val):
+        # 如果是字符串 (例如 "[-0.02  5.37]")，则去除括号并按空格分割解析
+        if isinstance(val, str):
+            val = val.replace('[', '').replace(']', '').replace('\n', ' ')
+            return np.fromstring(val, sep=' ', dtype=np.float32)
+        # 如果已经是列表，直接转换
+        return np.array(val, dtype=np.float32)
 
     # ---------------------------------------------------------
-    # 3. 读取 trunk 坐标
+    # 2. 读取 trunk 坐标
     # ---------------------------------------------------------
     trunk_df = pd.read_csv(trunk_net_path, index_col=0)
     X_trunk = trunk_df.to_numpy(dtype=np.float32)   # shape = [num_nodes, 3]
 
     # ---------------------------------------------------------
-    # 4. 构建 DeepONet 网络结构（必须与训练完全一致）
+    # 3. 构建 DeepONet 网络结构
     # ---------------------------------------------------------
     branch_dim = len(branch_input)
     trunk_dim = 3
@@ -159,55 +162,66 @@ def run_inference(branch_input,config_path="config.json",model_path = "final_mod
     )
 
     # ---------------------------------------------------------
-    # 5. 加载训练好的模型权重
+    # 4. 加载训练好的模型权重
     # ---------------------------------------------------------
-    # state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
-    # net.load_state_dict(state_dict)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     state_dict = torch.load(model_path, map_location=device, weights_only=True)
     net.load_state_dict(state_dict)
     net.to(device)
     net.eval()
 
     # ---------------------------------------------------------
-    # 6. 输入 branch 数据归一化
+    # 5. 数据预处理 (Branch 和 Trunk 同时处理)
     # ---------------------------------------------------------
     branch_input = np.array(branch_input, dtype=np.float32)
 
     if scaling_method == "standard":
-        branch_mean = np.array(cfg["branch_mean"], dtype=np.float32)
-        branch_std = np.array(cfg["branch_std"], dtype=np.float32)
+        # --- Branch 标准化 ---
+        branch_mean = parse_config_value(cfg["branch_mean"])
+        branch_std = parse_config_value(cfg["branch_std"])
         branch_scaled = (branch_input - branch_mean) / branch_std
 
+        # --- Trunk (坐标) 标准化 ---
+        trunk_mean = parse_config_value(cfg["trunk_mean"])
+        trunk_std = parse_config_value(cfg["trunk_std"])
+        X_trunk = (X_trunk - trunk_mean) / trunk_std
+
     elif scaling_method == "minmax":
-        branch_min = np.array(cfg["branch_min"], dtype=np.float32)
-        branch_max = np.array(cfg["branch_max"], dtype=np.float32)
+        # --- Branch 归一化 ---
+        branch_min = parse_config_value(cfg["branch_min"])
+        branch_max = parse_config_value(cfg["branch_max"])
         branch_scaled = (branch_input - branch_min) / (branch_max - branch_min)
 
-    else:
-        raise ValueError("Unknown scaling method: {}".format(scaling_method))
+        # --- Trunk (坐标) 归一化 ---
+        trunk_min = parse_config_value(cfg["trunk_min"])
+        trunk_max = parse_config_value(cfg["trunk_max"])
+        X_trunk = (X_trunk - trunk_min) / (trunk_max - trunk_min)
 
+    else:
+        # 无缩放
+        branch_scaled = branch_input
+        # X_trunk 保持原样
+
+    # 调整 Branch 形状
     branch_scaled = branch_scaled.reshape(1, -1)   # shape = [1, branch_dim]
 
+    # 转为 Tensor
     branch_tensor = torch.from_numpy(branch_scaled).float().to(device)
     trunk_tensor = torch.from_numpy(X_trunk).float().to(device)
 
     # ---------------------------------------------------------
-    # 7. 推理
+    # 6. 推理
     # ---------------------------------------------------------
-    # 推理前
     t0 = time.perf_counter()
 
     with torch.no_grad():
+        # DeepONetCartesianProd 输入为 tuple (branch, trunk)
         y_scaled = net((branch_tensor, trunk_tensor)).cpu().numpy()
 
-    # 推理后
     t1 = time.perf_counter()
-
     print(f"Inference time: {(t1 - t0) * 1000:.3f} ms")
+
     # ---------------------------------------------------------
-    # 8. 反归一化输出
+    # 7. 反归一化输出 (温度)
     # ---------------------------------------------------------
     if scaling_method == "standard":
         y_mean = float(cfg["y_mean"])
@@ -218,9 +232,10 @@ def run_inference(branch_input,config_path="config.json",model_path = "final_mod
         y_min = float(cfg["y_min"])
         y_max = float(cfg["y_max"])
         y_pred = y_scaled * (y_max - y_min) + y_min
+    else:
+        y_pred = y_scaled
 
     return y_pred  # shape = [num_nodes, 1]
-
 
 ############################################
 # 6. 接收 Unity 信息并处理

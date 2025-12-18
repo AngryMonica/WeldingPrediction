@@ -15,6 +15,8 @@ import torch.nn as nn
 from pathlib import Path
 
 data_dir = Path(r'D:\Users\MXY\PycharmProjects\data\t1s1')
+
+
 dde.backend.set_default_backend("pytorch")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # 检查CUDA是否可用
@@ -269,7 +271,7 @@ def load_config(config_file):
     return config
 
 
-def parse_args():
+def parse_args(config_file):
     """解析命令行参数，优先从配置文件导入参数配置
 
     Returns:
@@ -277,7 +279,7 @@ def parse_args():
     """
     # 第一步：先解析配置文件路径参数
     config_parser = argparse.ArgumentParser(description="DeepONet模型训练参数", add_help=False)
-    config_parser.add_argument("--config", type=str, default="config.yaml", help="YAML配置文件路径")
+    config_parser.add_argument("--config", type=str, default=config_file, help="YAML配置文件路径")
     config_args, _ = config_parser.parse_known_args()
 
     # 初始化默认参数
@@ -488,7 +490,7 @@ def load_data(branch_file, trunk_file, temp_file):
     # merged_all_time_points.csv: 每个样本真实温度 (test, step, increment, node_1...node_N)
     temp_df = pd.read_csv(temp_file, index_col=False)
     temp_df_with_titles = temp_df.copy()  # 保留完整列名的副本
-    temp_df.drop(columns=['test', 'step', 'increment'], inplace=True)
+    temp_df.drop(columns=['test', 'step', 'increment','step_time'], inplace=True)
     print(f"[INFO] 温度数据 {temp_file} 维度: {temp_df.shape}")
 
     # branch_net.csv: 每行一个 sample，每列一个 node (列名为 node_id)
@@ -502,7 +504,7 @@ def load_data(branch_file, trunk_file, temp_file):
 def prepare_data(branch_df, trunk_df, temp_df, isPCA=False, pca_dim=512, test_size=0.2, random_state=42,
                  scaling_method="standard"):
     """
-    准备 DeepONet 输入输出数据
+    准备 DeepONet 输入输出数据 (已添加坐标标准化/归一化)
 
     Args:
         branch_df: 分支网络输入数据
@@ -519,7 +521,7 @@ def prepare_data(branch_df, trunk_df, temp_df, isPCA=False, pca_dim=512, test_si
         X_branch: 原始分支输入
         scale_params: 包含用于逆变换的参数字典
         X_branch_test_scaled: 处理后的测试集分支输入
-        X_trunk_test: 测试集主干输入
+        X_trunk_scaled: 处理后的主干输入 (坐标)
         y_test_scaled: 处理后的测试集输出
     """
     # Branch 输入：热流密度
@@ -539,50 +541,60 @@ def prepare_data(branch_df, trunk_df, temp_df, isPCA=False, pca_dim=512, test_si
     X_branch_train, X_branch_test, y_train, y_test = train_test_split(
         X_branch, y, test_size=test_size, random_state=random_state
     )
-    X_trunk_train = X_trunk
-    X_trunk_test = X_trunk
+
+    # Trunk 数据通常是固定的几何结构，训练和测试共用同一套坐标点
+    # 我们将在缩放后再统一赋值
 
     print(f"[INFO] 训练样本数: {X_branch_train.shape[0]}, 测试样本数: {X_branch_test.shape[0]}")
     print(f"[INFO] 节点数: {X_trunk.shape[0]}")
 
     # 根据 scaling_method 选择不同的数据预处理方式
     if scaling_method == "standard":
-        # === 标准化 ===
+        # === 标准化 (Standardization) ===
+
+        # 1. Branch (分支网络输入)
         branch_mean = np.mean(X_branch_train)
         branch_std = np.std(X_branch_train) + 1e-8
         X_branch_train_scaled = (X_branch_train - branch_mean) / branch_std
         X_branch_test_scaled = (X_branch_test - branch_mean) / branch_std
 
+        # 2. Trunk (主干网络输入 - 坐标) [新增]
+        # 对 x, y, z 三个维度分别计算均值和标准差
+        trunk_mean = np.mean(X_trunk, axis=0)
+        trunk_std = np.std(X_trunk, axis=0) + 1e-8
+        X_trunk_scaled = (X_trunk - trunk_mean) / trunk_std
+
+        # 3. Output (输出 - 温度)
         y_mean = np.mean(y_train)
         y_std = np.std(y_train) + 1e-8
         y_train_scaled = (y_train - y_mean) / y_std
         y_test_scaled = (y_test - y_mean) / y_std
 
-        # branch_mean = X_branch_train.mean(axis=0, keepdims=True)
-        # branch_std = X_branch_train.std(axis=0, keepdims=True) + 1e-8
-        # X_branch_train_scaled = (X_branch_train - branch_mean) / branch_std
-        # X_branch_test_scaled = (X_branch_test - branch_mean) / branch_std
-
-        # y_mean = np.mean(y_train, axis=0, keepdims=True)
-        # y_std = np.std(y_train, axis=0, keepdims=True) + 1e-8
-        # y_train_scaled = (y_train - y_mean) / y_std
-        # y_test_scaled = (y_test - y_mean) / y_std
-
         scale_params = {
             "type": "standard",
             "branch_mean": branch_mean,
             "branch_std": branch_std,
+            "trunk_mean": trunk_mean,  # 保存坐标均值
+            "trunk_std": trunk_std,  # 保存坐标标准差
             "y_mean": y_mean,
             "y_std": y_std,
         }
 
     elif scaling_method == "minmax":
-        # === 归一化 ===
+        # === 归一化 (MinMax Scaling) ===
+
+        # 1. Branch
         branch_min = X_branch_train.min(axis=0, keepdims=True)
         branch_max = X_branch_train.max(axis=0, keepdims=True)
         X_branch_train_scaled = (X_branch_train - branch_min) / (branch_max - branch_min + 1e-8)
         X_branch_test_scaled = (X_branch_test - branch_min) / (branch_max - branch_min + 1e-8)
 
+        # 2. Trunk (主干网络输入 - 坐标) [新增]
+        trunk_min = np.min(X_trunk, axis=0)
+        trunk_max = np.max(X_trunk, axis=0)
+        X_trunk_scaled = (X_trunk - trunk_min) / (trunk_max - trunk_min + 1e-8)
+
+        # 3. Output
         y_min = np.min(y_train)
         y_max = np.max(y_train)
         y_train_scaled = (y_train - y_min) / (y_max - y_min + 1e-8)
@@ -592,6 +604,8 @@ def prepare_data(branch_df, trunk_df, temp_df, isPCA=False, pca_dim=512, test_si
             "type": "minmax",
             "branch_min": branch_min,
             "branch_max": branch_max,
+            "trunk_min": trunk_min,  # 保存坐标最小值
+            "trunk_max": trunk_max,  # 保存坐标最大值
             "y_min": y_min,
             "y_max": y_max,
         }
@@ -600,20 +614,23 @@ def prepare_data(branch_df, trunk_df, temp_df, isPCA=False, pca_dim=512, test_si
         # === 不做任何处理 ===
         X_branch_train_scaled = X_branch_train
         X_branch_test_scaled = X_branch_test
+        X_trunk_scaled = X_trunk
         y_train_scaled = y_train
         y_test_scaled = y_test
 
         scale_params = {"type": "none"}
 
     # 构造 DeepONet 数据结构
+    # 注意：DeepONetCartesianProd 的 X_train/X_test 格式为 tuple (X_branch, X_trunk)
+    # 这里的 X_trunk_scaled 是所有节点坐标的集合，训练和测试共用
     data = dde.data.TripleCartesianProd(
-        X_train=(X_branch_train_scaled, X_trunk_train),
+        X_train=(X_branch_train_scaled, X_trunk_scaled),
         y_train=y_train_scaled,
-        X_test=(X_branch_test_scaled, X_trunk_test),
+        X_test=(X_branch_test_scaled, X_trunk_scaled),
         y_test=y_test_scaled,
     )
 
-    return data, X_branch, scale_params, X_branch_test_scaled, X_trunk_test, y_test
+    return data, X_branch, scale_params, X_branch_test_scaled, X_trunk_scaled, y_test
 
 
 class CustomDeepONet(dde.nn.DeepONetCartesianProd):
@@ -835,7 +852,7 @@ def evaluate_model(y_true, y_pred, output_dir):
 # ===========================================================
 if __name__ == "__main__":
     # 解析命令行参数
-    args = parse_args()
+    args = parse_args(r"D:\Users\MXY\PycharmProjects\data\config.yaml")
 
     # 创建实验目录
     exp_dir, log_dir, ckpt_dir, output_dir = create_experiment_dir(
