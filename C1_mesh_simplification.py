@@ -10,16 +10,16 @@ data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
 # ============================================================
 nodes_path = data_dir/"nodes.csv"
 triangles_path = data_dir/ "triangles.csv"
-temperature_path = data_dir/"t1s1/temperature_t1s1.csv"
-stress_path = data_dir/"t1s1/stress_t1s1_aligned.csv"
+temperature_path = data_dir/"all_temperature_combined.csv"
+stress_path = data_dir/"all_stress_combined.csv"
 
 # ============================================================
 # 输出路径
 # ============================================================
-sampled_nodes_path = data_dir/"t1s1/sampled_nodes.csv"
-sampled_triangles_path = data_dir/ "t1s1/sampled_triangles.csv"
-sampled_temperature_path = data_dir/ "t1s1/sampled_temperature.csv"
-sampled_stress_path = data_dir/"t1s1/sampled_stress.csv"
+sampled_nodes_path = data_dir/"sampled_nodes.csv"
+sampled_triangles_path = data_dir/ "sampled_triangles.csv"
+sampled_temperature_path = data_dir/ "sampled_temperature.csv"
+sampled_stress_path = data_dir/"sampled_stress.csv"
 
 # ============================================================
 # [新增] 参数：区域定义 (请根据实际模型坐标修改)
@@ -37,7 +37,7 @@ HAZ_Z_MIN, HAZ_Z_MAX = 0.0, 100.0
 # ============================================================
 # [修改] 参数：三层简化策略 (保留比例)
 # ============================================================
-ratio_weld = 0.3  # 焊缝区：保留 95% (几乎不简化)
+ratio_weld = 0.4  # 焊缝区：保留 95% (几乎不简化)
 ratio_haz  = 0.5 # 热影响区：保留 40% (中等简化)
 ratio_base = 0.8  # 母材区：保留 5% (大幅简化)
 

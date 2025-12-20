@@ -3,9 +3,9 @@ import numpy as np
 import sys
 from pathlib import Path
 
-data_dir = Path(r'D:\Users\MXY\PycharmProjects\data\t1s1')
+data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
 node_file = data_dir/"sampled_nodes.csv"
-weld_file = data_dir/"welding_data_t1s1.csv"
+weld_file = data_dir/"welding_data.csv"
 out_branch=data_dir/"sampled_herstory_branch_net.csv"
 out_trunk=data_dir/"sampled_trunk_net.csv"
 # =============================

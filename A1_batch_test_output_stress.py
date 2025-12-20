@@ -11,11 +11,11 @@ import math
 import numpy as np
 from abaqusConstants import *
 
-csv_stress = './output_ALL_stress/' + 'all_stress_elements.csv'
-with open(csv_stress, 'w') as fp2:
-    for i in range(1,17):
+for i in range(2, 17):
+    csv_stress = r'D:\Users\MXY\PycharmProjects\data\all_stress_elements'+r'\test'+str(i)+'_stress.csv'
+    with open(csv_stress, 'w') as fp2:
         pathDir = os.getcwd()
-        jobname = 'test'+str(i)+'_stress'
+        jobname = 'test' + str(i) + '_stress'
         print(jobname)
         odbName = jobname + '.odb'
         path = pathDir + '\\' + odbName

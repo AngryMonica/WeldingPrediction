@@ -11,10 +11,9 @@ import math
 import numpy as np
 from abaqusConstants import *
 
-csv_temperature = './output_ALL_stress/' + 'all_temperature_nodes.csv'
-
-with open(csv_temperature, 'w') as fp1:
-    for i in range(1,17):
+for i in range(1, 17):
+    csv_temperature = r'D:\Users\MXY\PycharmProjects\data\all_temperature_nodes' + r'\test' + str(i) + '_temp.csv'
+    with open(csv_temperature, 'w') as fp1:
         pathDir = os.getcwd()
         jobname = 'test'+str(i)
         print(jobname)

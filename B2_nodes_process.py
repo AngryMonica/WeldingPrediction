@@ -1,12 +1,12 @@
 import csv
 from pathlib import Path
 
-data_dir = Path(r'D:\Users\MXY\PycharmProjects\data\t1s1')
+data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
 # -------------------------------
 # 读取 nodes.txt
 # -------------------------------
 node_coords = {}
-with open(data_dir/ "data/nodes.txt", "r") as f:
+with open(data_dir/ "nodes.txt", "r") as f:
     for line in f:
         line = line.strip()
         if not line:
@@ -18,7 +18,7 @@ with open(data_dir/ "data/nodes.txt", "r") as f:
 # 读取 elements.txt：每 8 行构成一个 C3D8 单元
 # ---------------------------------------------------
 elements = []
-with open(data_dir/"data/elements.txt", "r") as f:
+with open(data_dir/"elements.txt", "r") as f:
     current = []
     last_eid = None
     for line in f:
@@ -83,7 +83,7 @@ for elem in elements:
 # ---------------------------------------------------
 # 输出 nodes.csv（不改变顺序，只写坐标）
 # ---------------------------------------------------
-with open(data_dir/"data/nodes.csv", "w", newline="") as f:
+with open(data_dir/"nodes.csv", "w", newline="") as f:
     writer = csv.writer(f)
     for nid in sorted(node_coords.keys()):
         x, y, z = node_coords[nid]
@@ -92,7 +92,7 @@ with open(data_dir/"data/nodes.csv", "w", newline="") as f:
 # ---------------------------------------------------
 # 输出 node_index.csv（改为 0-based，每个索引独立一行）
 # ---------------------------------------------------
-with open(data_dir/"data/triangles.csv", "w", newline="") as f:
+with open(data_dir/"triangles.csv", "w", newline="") as f:
     writer = csv.writer(f)
     for tri in triangles:
         writer.writerow([tri[0] - 1])

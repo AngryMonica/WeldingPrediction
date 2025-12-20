@@ -79,7 +79,8 @@ def parse_args(config_yaml_path):
         'data': {
             'branch_file': 'branch_net_K_sampled.csv',
             'trunk_file': 'trunk_net_K_sampled.csv',
-            'temp_file': 'merged_all_time_points_K_sampled.csv',
+            'temp_file': 'all_temperature.csv',
+            'stress_file': 'all_stress.csv',
             'isPCA': False, 'pca_dim': 512, 'test_size': 0.2,
             'random_state': 42, 'scaling_method': "standard"
         },
@@ -87,7 +88,8 @@ def parse_args(config_yaml_path):
             'branch_layers': [256, 256, 128], 'trunk_layers': [64, 64, 128],
             'activation': 'tanh', 'initializer': 'Glorot normal',
             'tasks_config': {
-                'temperature': {'output_dim': 1, 'loss_weight': 1.0, 'loss_type': 'mse'}
+                'temperature': {'output_dim': 1, 'loss_weight': 1.0, 'loss_type': 'mse'},
+                'stress': {'output_dim': 1, 'loss_weight': 1.0, 'loss_type': 'mse'}
             },
             'multi_output_strategy': "split_branch",
             'is_output_activation': False, 'output_activation': 'relu',
@@ -137,6 +139,7 @@ def parse_args(config_yaml_path):
     parser.add_argument("--branch_file", type=str, default=data_config['branch_file'])
     parser.add_argument("--trunk_file", type=str, default=data_config['trunk_file'])
     parser.add_argument("--temp_file", type=str, default=data_config['temp_file'])
+    parser.add_argument("--stress_file", type=str, default=data_config['stress_file'])
     parser.add_argument("--isPCA", type=bool, default=data_config['isPCA'])
     parser.add_argument("--pca_dim", type=int, default=data_config['pca_dim'])
     parser.add_argument("--test_size", type=float, default=data_config['test_size'])
@@ -198,21 +201,25 @@ def parse_args(config_yaml_path):
 # 数据加载和预处理
 # ===========================================================
 
-def load_data(branch_file, trunk_file, temp_file):
+def load_data(branch_file, trunk_file, temp_file,stress_file):
     """加载数据文件"""
     trunk_df = pd.read_csv(trunk_file, index_col=0)
     print(f"[INFO] trunk_net 维度: {trunk_df.shape}")
 
-    temp_df = pd.read_csv(temp_file, index_col=0)
-    temp_df_with_titles = temp_df.copy()
-    temp_df.drop(columns=['test', 'step', 'increment'], inplace=True)
+    temp_df = pd.read_csv(temp_file)
+    temp_df.drop(columns=['test', 'step', 'increment','step_time'], inplace=True)
     print(f"[INFO] 温度数据 {temp_file} 维度: {temp_df.shape}")
+
+    stress_df=pd.read_csv(stress_file)
+    stress_df.drop(columns=['test', 'step', 'increment','step_time'], inplace=True)
+    print(f"[INFO] 应力数据 {stress_file} 维度: {stress_df.shape}")
+
 
     branch_df = pd.read_csv(branch_file, index_col=0)
     branch_df = branch_df.iloc[temp_df.index]
     print(f"[INFO] branch_net 维度: {branch_df.shape}")
 
-    return branch_df, trunk_df, temp_df, temp_df_with_titles
+    return branch_df, trunk_df, temp_df,stress_df
 
 
 class MultiTaskOperatorData:
@@ -283,8 +290,24 @@ class MultiTaskOperatorData:
             }
 
         # Trunk输入通常不缩放
-        self.trunk_train = self.trunk_train_raw
-        self.trunk_test = self.trunk_test_raw
+        # self.trunk_train = self.trunk_train_raw
+        # self.trunk_test = self.trunk_test_raw
+
+        # Trunk输入缩放
+        if self.scale_method == 'standard':
+            self.trunk_scaler = StandardScaler()
+            self.trunk_train = self.trunk_scaler.fit_transform(self.trunk_train_raw)
+            self.trunk_test = self.trunk_scaler.transform(self.trunk_test_raw)
+            self.scale_params['trunk'] = {
+                'type': 'standard', 'mean': self.trunk_scaler.mean_, 'std': self.trunk_scaler.scale_
+            }
+        elif self.scale_method == 'minmax':
+            self.trunk_scaler = MinMaxScaler()
+            self.trunk_train = self.trunk_scaler.fit_transform(self.trunk_train_raw)
+            self.trunk_test = self.trunk_scaler.transform(self.trunk_test_raw)
+            self.scale_params['trunk'] = {
+                'type': 'minmax', 'min': self.trunk_scaler.data_min_, 'max': self.trunk_scaler.data_max_
+            }
 
         # 标签缩放
         self.labels_train = {}
@@ -324,7 +347,7 @@ class MultiTaskOperatorData:
         return self.branch_test_raw, self.trunk_test_raw, self.labels_test_raw
 
 
-def prepare_multitask_data(branch_df, trunk_df, temp_df, stress_df=None,
+def prepare_multitask_data(branch_df, trunk_df, temp_df, stress_df,
                            isPCA=False, pca_dim=512, test_size=0.2, random_state=42,
                            scale="standard"):
     """准备多任务数据"""
@@ -347,8 +370,8 @@ def prepare_multitask_data(branch_df, trunk_df, temp_df, stress_df=None,
         labels_dict['stress'] = y_stress
 
     # 确保trunk是3D格式
-    if X_trunk.ndim == 2:
-        X_trunk = np.tile(X_trunk[np.newaxis, :, :], (X_branch.shape[0], 1, 1))
+    # if X_trunk.ndim == 2:
+    #     X_trunk = np.tile(X_trunk[np.newaxis, :, :], (X_branch.shape[0], 1, 1))
 
     # 创建数据对象
     data = MultiTaskOperatorData(
@@ -496,9 +519,10 @@ class MultiTaskTrainer:
             task: torch.tensor(labels, dtype=torch.float32).to(self.device)
             for task, labels in labels_train.items()
         }
+        generator = torch.Generator(device=self.device)  # 确保生成器的设备与模型一致
 
         dataset = TensorDataset(branch_tensor, trunk_tensor, *labels_tensor.values())
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator)
 
         # 训练循环
         for epoch in range(iterations):
@@ -562,7 +586,7 @@ class MultiTaskTensorBoardCallback:
 # ===========================================================
 
 def main():
-    args = parse_args("data/config.yaml")
+    args = parse_args("D:/Users/MXY/PycharmProjects/data/config.yaml")
 
     # 创建实验目录
     exp_dir, log_dir, ckpt_dir, output_dir = create_experiment_dir(
@@ -571,13 +595,13 @@ def main():
     save_config(vars(args), exp_dir)
 
     # 加载数据
-    branch_df, trunk_df, temp_df, temp_df_with_titles = load_data(
-        args.branch_file, args.trunk_file, args.temp_file
+    branch_df, trunk_df, temp_df, stress_df = load_data(
+        args.branch_file, args.trunk_file, args.temp_file, args.stress_file
     )
 
     # 准备多任务数据
     data, pca_obj = prepare_multitask_data(
-        branch_df, trunk_df, temp_df, None,  # stress_df设为None
+        branch_df, trunk_df, temp_df, stress_df,  # stress_df设为None
         isPCA=args.isPCA, pca_dim=args.pca_dim, test_size=args.test_size,
         random_state=args.random_state, scale=args.scaling_method
     )
