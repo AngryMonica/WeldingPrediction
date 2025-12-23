@@ -50,9 +50,25 @@ def create_experiment_dir(base_dir="runs", exp_name=None):
     return exp_dir, log_dir, ckpt_dir, output_dir
 
 
-def save_config(config, exp_dir):
-    """保存配置"""
+def save_config(config, exp_dir, scale_params=None):
+    """保存配置，包括正确格式化的缩放参数"""
     config_path = os.path.join(exp_dir, "config.json")
+
+    # 转换 scale_params 中的 numpy 数组为列表
+    if scale_params is not None:
+        formatted_params = {}
+        for key, value in scale_params.items():
+            if isinstance(value, dict):
+                formatted_params[key] = {}
+                for k, v in value.items():
+                    if isinstance(v, np.ndarray):
+                        formatted_params[key][k] = v.tolist()
+                    else:
+                        formatted_params[key][k] = v
+            else:
+                formatted_params[key] = value
+        config['scale_params'] = formatted_params
+
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
     print(f"配置已保存到: {config_path}")
@@ -500,7 +516,6 @@ class MultiTaskTrainer:
         self.model.to(self.device)
 
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
-
         self.loss_fn = MultiTaskLoss(model.tasks_config)
 
         self.losshistory = type('LossHistory', (), {'steps': [], 'loss_train': [], 'loss_test': []})()
@@ -511,32 +526,18 @@ class MultiTaskTrainer:
     def train(self, iterations, batch_size=32, callbacks=None, display_every=100):
         callbacks = callbacks or []
 
-        # 绑定回调的 trainer 引用并触发 on_train_begin
-        for cb in callbacks:
-            try:
-                if hasattr(cb, 'set_trainer'):
-                    cb.set_trainer(self)
-                if hasattr(cb, 'on_train_begin'):
-                    cb.on_train_begin()
-            except Exception:
-                pass
         # 准备数据
         branch_train, trunk_train, labels_train = self.data.get_train_data(scaled=True)
 
         branch_tensor = torch.tensor(branch_train, dtype=torch.float32).to(self.device)
         trunk_tensor = torch.tensor(trunk_train, dtype=torch.float32).to(self.device)
-        # 按 model.task_names 顺序构造标签张量列表和字典
-        label_tensors_list = []
-        labels_tensor_dict = {}
-        for task in self.model.task_names:
-            lab = labels_train[task]
-            t = torch.tensor(lab, dtype=torch.float32).to(self.device)
-            label_tensors_list.append(t)
-            labels_tensor_dict[task] = t
-
+        labels_tensor = {
+            task: torch.tensor(labels, dtype=torch.float32).to(self.device)
+            for task, labels in labels_train.items()
+        }
         generator = torch.Generator(device=self.device)  # 确保生成器的设备与模型一致
 
-        dataset = TensorDataset(branch_tensor, trunk_tensor, *label_tensors_list)
+        dataset = TensorDataset(branch_tensor, trunk_tensor, *labels_tensor.values())
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator)
 
         # 训练循环
@@ -563,244 +564,37 @@ class MultiTaskTrainer:
                     epoch_task_losses[task] += loss
 
             # 记录损失
-            avg_loss = epoch_total_loss / max(1, len(dataloader))
+            avg_loss = epoch_total_loss / len(dataloader)
             self.losshistory.steps.append(epoch)
             self.losshistory.loss_train.append(avg_loss)
-            # 计算并记录测试集损失（如果存在测试样本）
-            test_loss_value = None
-            if getattr(self.data, "num_test", 0) > 0:
-                self.model.eval()
-                branch_test, trunk_test, labels_test = self.data.get_test_data(scaled=True)
-                with torch.no_grad():
-                    b_test_tensor = torch.tensor(branch_test, dtype=torch.float32).to(self.device)
-                    t_test_tensor = torch.tensor(trunk_test, dtype=torch.float32).to(self.device)
-                    # 构建测试标签字典与模型任务顺序一致
-                    labels_test_tensors = {
-                        task: torch.tensor(labels_test[task], dtype=torch.float32).to(self.device)
-                        for task in self.model.task_names
-                    }
-                    preds_test = self.model([b_test_tensor, t_test_tensor])
-                    test_total_loss, _ = self.loss_fn(preds_test, labels_test_tensors)
-                    test_loss_value = test_total_loss.item()
-                    self.losshistory.loss_test.append(test_loss_value)
-            else:
-                # 没有测试集时保持与训练长度一致的占位
-                self.losshistory.loss_test.append(avg_loss)
+            self.losshistory.loss_test.append(avg_loss)
 
-            # 更新训练状态
-            self.train_state.epoch = epoch
-            self.train_state.loss = avg_loss
-            if avg_loss < self.train_state.best_loss:
-                self.train_state.best_loss = avg_loss
-                self.train_state.best_step = epoch
-
-            # 回调 on_epoch_end
-            for cb in callbacks:
-                try:
-                    if hasattr(cb, 'on_epoch_end'):
-                        cb.on_epoch_end()
-                except Exception:
-                    pass
+            # 回调
+            for callback in callbacks:
+                if hasattr(callback, 'on_epoch_end'):
+                    callback.on_epoch_end(epoch, avg_loss, self.model, self)
 
             if epoch % display_every == 0:
-                if test_loss_value is not None:
-                    print(f'Epoch {epoch}: Train Loss: {avg_loss:.6f}, Test Loss: {test_loss_value:.6f}')
-                else:
-                    print(f'Epoch {epoch}: Train Loss: {avg_loss:.6f}')
+                print(f'Epoch {epoch}: Loss: {avg_loss:.6f}')
                 for task, loss in epoch_task_losses.items():
-                    print(f'  {task}: {loss / max(1, len(dataloader)):.6f}')
-
-            # 训练结束回调
-        for cb in callbacks:
-            try:
-                if hasattr(cb, 'on_train_end'):
-                    cb.on_train_end()
-            except Exception:
-                pass
+                    print(f'  {task}: {loss / len(dataloader):.6f}')
 
         return self.losshistory, self.train_state
 
 
-# python
-class TensorBoardCallback(dde.callbacks.Callback):
-    def __init__(self, writer, log_freq=1, ckpt_dir=None, save_freq=1, scale_params=None):
-        super().__init__()
-        self.writer = writer
+class MultiTaskTensorBoardCallback:
+    def __init__(self, log_dir, log_freq=10):
+        self.writer = SummaryWriter(log_dir)
         self.log_freq = log_freq
-        self.ckpt_dir = ckpt_dir
-        self.save_freq = save_freq
-        self.scale_params = scale_params
         self.step = 0
-        self.best_loss = float('inf')
-        self.trainer = None
-        self.model_ref = None
-        self.data = None
 
-    def set_trainer(self, trainer):
-        self.trainer = trainer
-        try:
-            self.model_ref = trainer.model
-        except Exception:
-            self.model_ref = None
-        try:
-            self.data = trainer.data
-        except Exception:
-            self.data = None
-
-    def on_train_begin(self):
-        print("训练开始，TensorBoard记录已启用")
-        try:
-            if self.model_ref is not None and hasattr(self.model_ref, "net"):
-                dummy_branch = torch.zeros(1, self.model_ref.net.branch.linears[0].in_features)
-                dummy_trunk = torch.zeros(1, self.model_ref.net.trunk.linears[0].in_features)
-                self.writer.add_graph(self.model_ref, (dummy_branch, dummy_trunk))
-        except Exception as e:
-            print(f"记录模型图结构时出错: {e}")
-
-    def _unscale_array(self, arr, task_name):
-        """更鲁棒的反缩放：先把 arr 转为 numpy，根据缩放参数重塑到 (-1, feature_dim) 再反缩放，最后恢复形状"""
-        arr = np.asarray(arr)
-        sp = None
-        if self.data is not None and hasattr(self.data, "scale_params"):
-            sp = self.data.scale_params.get(task_name, None)
-        if sp is None and self.scale_params is not None:
-            sp = self.scale_params.get(task_name, None)
-        if sp is None:
-            return arr
-
-        stype = sp.get("type", "standard")
-
-        def _apply_unscale(arr_np, param_a, param_b=None, mode="standard"):
-            # param_a: mean or min, param_b: std or max
-            mean_like = np.asarray(param_a)
-            if mode == "standard":
-                std_like = np.asarray(param_b)
-                # if scalar mean/std, broadcast directly
-                if mean_like.ndim == 0:
-                    return arr_np * std_like + mean_like
-                # 如果最后一维与 mean 长度匹配，直接按最后维度反缩放
-                if arr_np.ndim >= 1 and arr_np.shape[-1] == mean_like.size:
-                    return arr_np * std_like + mean_like
-                # 如果 arr 为一维且能整除 mean 长度，reshape 后反缩放
-                if arr_np.ndim == 1 and arr_np.size % mean_like.size == 0:
-                    orig_shape = arr_np.shape
-                    arr2 = arr_np.reshape(-1, mean_like.size)
-                    res = arr2 * std_like + mean_like
-                    return res.reshape(orig_shape)
-                # 最后尝试广播（若失败返回原数组）
-                try:
-                    return arr_np * std_like + mean_like
-                except Exception:
-                    return arr_np
-            else:  # minmax
-                vmin = mean_like
-                vmax = np.asarray(param_b)
-                scale = (vmax - vmin)
-                if vmin.ndim == 0:
-                    return arr_np * scale + vmin
-                if arr_np.ndim >= 1 and arr_np.shape[-1] == vmin.size:
-                    return arr_np * scale + vmin
-                if arr_np.ndim == 1 and arr_np.size % vmin.size == 0:
-                    orig_shape = arr_np.shape
-                    arr2 = arr_np.reshape(-1, vmin.size)
-                    res = arr2 * scale + vmin
-                    return res.reshape(orig_shape)
-                try:
-                    return arr_np * scale + vmin
-                except Exception:
-                    return arr_np
-
-        if stype == "standard":
-            mean = sp.get("mean", 0.0)
-            std = sp.get("std", 1.0)
-            return _apply_unscale(arr, mean, std, mode="standard")
-        elif stype == "minmax":
-            vmin = sp.get("min", 0.0)
-            vmax = sp.get("max", 1.0)
-            return _apply_unscale(arr, vmin, vmax, mode="minmax")
-        else:
-            return arr
-
-    def on_epoch_end(self):
-        if self.step % self.log_freq != 0:
+    def on_epoch_end(self, epoch, loss, model, trainer):
+        if self.step % self.log_freq == 0:
+            self.writer.add_scalar('Loss/total', loss, self.step)
             self.step += 1
-            return
-
-        try:
-            if self.trainer is not None and hasattr(self.trainer, "losshistory"):
-                if len(self.trainer.losshistory.loss_train) > 0:
-                    loss_train = self.trainer.losshistory.loss_train[-1]
-                    self.writer.add_scalar('Loss/Train', loss_train, self.step)
-                if len(self.trainer.losshistory.loss_test) > 0:
-                    loss_test = self.trainer.losshistory.loss_test[-1]
-                    self.writer.add_scalar('Loss/Test', loss_test, self.step)
-
-            if self.model_ref is not None and self.data is not None:
-                branch_test, trunk_test, labels_test = self.data.get_test_data(scaled=True)
-                self.model_ref.eval()
-                with torch.no_grad():
-                    b_tensor = torch.tensor(branch_test, dtype=torch.float32).to(
-                        self.model_ref.parameters().__next__().device)
-                    t_tensor = torch.tensor(trunk_test, dtype=torch.float32).to(
-                        self.model_ref.parameters().__next__().device)
-                    preds = self.model_ref([b_tensor, t_tensor])
-
-                for task in self.model_ref.task_names:
-                    if task not in preds or task not in labels_test:
-                        continue
-                    y_pred_scaled = preds[task].cpu().numpy()
-                    y_true_scaled = np.asarray(labels_test[task])
-
-                    # 如果最后一个维度是 1（单通道），去掉该维度
-                    if y_pred_scaled.ndim >= 3 and y_pred_scaled.shape[-1] == 1:
-                        y_pred_scaled = np.squeeze(y_pred_scaled, axis=-1)
-                    if y_true_scaled.ndim >= 3 and y_true_scaled.shape[-1] == 1:
-                        y_true_scaled = np.squeeze(y_true_scaled, axis=-1)
-
-                    # 反缩放（函数内会自动处理 reshape）
-                    y_pred = self._unscale_array(y_pred_scaled, task)
-                    y_true = self._unscale_array(y_true_scaled, task)
-
-                    y_true_flat = y_true.reshape(-1)
-                    y_pred_flat = y_pred.reshape(-1)
-
-                    mse = np.mean((y_true_flat - y_pred_flat) ** 2)
-                    rmse = np.sqrt(mse)
-                    mae = np.mean(np.abs(y_true_flat - y_pred_flat))
-                    denom = np.where(np.abs(y_true_flat) < 1e-8, 1e-8, np.abs(y_true_flat))
-                    mape = np.mean(np.abs((y_true_flat - y_pred_flat) / denom)) * 100.0
-
-                    self.writer.add_scalar(f"Unscaled/{task}/RMSE", rmse, self.step)
-                    self.writer.add_scalar(f"Unscaled/{task}/MAE", mae, self.step)
-                    self.writer.add_scalar(f"Unscaled/{task}/MAPE", mape, self.step)
-
-                    try:
-                        max_points = 10000
-                        idx = np.random.choice(len(y_pred_flat), min(len(y_pred_flat), max_points), replace=False)
-                        self.writer.add_histogram(f"{task}/pred", y_pred_flat[idx], self.step)
-                        self.writer.add_histogram(f"{task}/true", y_true_flat[idx], self.step)
-                    except Exception:
-                        pass
-
-            if self.trainer is not None and hasattr(self.trainer, "optimizer"):
-                try:
-                    lr = self.trainer.optimizer.param_groups[0]["lr"]
-                    self.writer.add_scalar("LearningRate", lr, self.step)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            print(f"记录TensorBoard数据时出错: {e}")
-
-        self.step += 1
 
     def on_train_end(self):
-        print("训练结束，关闭TensorBoard写入器")
-        try:
-            self.writer.close()
-        except Exception:
-            pass
-
+        self.writer.close()
 
 
 # ===========================================================
@@ -814,7 +608,7 @@ def main():
     exp_dir, log_dir, ckpt_dir, output_dir = create_experiment_dir(
         args.base_dir, args.exp_name
     )
-    save_config(vars(args), exp_dir)
+
 
     # 加载数据
     branch_df, trunk_df, temp_df, stress_df = load_data(
@@ -847,36 +641,24 @@ def main():
     )
 
     # 创建回调
-    # callbacks = [MultiTaskTensorBoardCallback(log_dir, args.log_freq)]
+    callbacks = [MultiTaskTensorBoardCallback(log_dir, args.log_freq)]
 
-    writer=SummaryWriter(log_dir=log_dir)
-    # 创建回调
-    tensorboard_callback = TensorBoardCallback(
-        writer,
-        log_freq=args.log_freq,
-        ckpt_dir=ckpt_dir,
-        save_freq=args.save_freq,
-        scale_params=data.scale_params
-    )
-
-    early_stopping = dde.callbacks.EarlyStopping(
-        monitor=args.monitor,
-        min_delta=args.min_delta,
-        patience=args.patience,
-        baseline=args.baseline,
-        start_from_epoch=args.start_from_epoch
-    )
     # 训练模型
     trainer = MultiTaskTrainer(model, data, lr=args.lr)
     losshistory, train_state = trainer.train(
         iterations=args.epochs,
         batch_size=args.batch_size or 32,
-        callbacks=[tensorboard_callback,early_stopping],
+        callbacks=callbacks,
         display_every=args.display_every
     )
     path = os.path.join(output_dir, "final_model.pt")
     torch.save(model.state_dict(), path)
     print(f"训练好的模型已保存到: {path}")
+
+    # 保存配置（包含正确格式的缩放参数）
+    config = vars(args).copy()
+    save_config(config, exp_dir, scale_params=data.scale_params)
+
 
     print("训练完成!")
     return losshistory, train_state, model, data

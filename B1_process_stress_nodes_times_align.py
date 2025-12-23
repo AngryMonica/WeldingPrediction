@@ -72,7 +72,7 @@ def process_test_data(test_id, temp_dir, stress_dir, node_to_elems, elem_labels)
     print(f"目标节点数: {len(target_nodes)}")
 
     print(f"处理 Test {test_id} 的应力数据...")
-    stress_df = pd.read_csv(stress_file, low_memory=False)
+    stress_df = pd.read_csv(stress_file)
     print(f"应力数据: {stress_df.shape[0]} 行, {stress_df.shape[1]} 列")
 
     print("转换应力数据（单元->节点）...")
@@ -103,7 +103,13 @@ def main():
     # 假设测试编号从 1 开始，直到文件夹中没有对应文件为止
     test_id = 1
     while (temp_dir / f"test{test_id}_temp.csv").exists() and (stress_dir / f"test{test_id}_stress.csv").exists():
-        temp_df, aligned_df = process_test_data(test_id, temp_dir, stress_dir, node_to_elems, elem_labels={})
+        if test_id==1:
+            stress_file = stress_dir / f"test{test_id}_stress.csv"
+            stress_df = pd.read_csv(stress_file)
+            elem_cols = [c for c in stress_df.columns if c.startswith('E')]
+            elem_labels = {int(c[1:]): c for c in elem_cols}
+            print(f"单元数: {len(elem_labels)}")
+        temp_df, aligned_df = process_test_data(test_id, temp_dir, stress_dir, node_to_elems, elem_labels)
         temp_results.append(temp_df)
         stress_results.append(aligned_df)
         test_id += 1
