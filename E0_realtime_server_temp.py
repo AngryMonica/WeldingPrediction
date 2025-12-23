@@ -12,7 +12,7 @@ import time
 import threading
 import queue
 
-from D_model_train import CustomDeepONet
+from D0_model_train_temp import CustomDeepONet
 from pathlib import Path
 
 data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')

@@ -13,7 +13,7 @@ from pathlib import Path
 # 修改导入：使用多任务模型
 from D1_model_train_multi import MultiTaskDeepONet
 
-data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
+data_dir = Path(r'D:\Users\MXY\PycharmProjects\data\t1s1')
 
 model_path = data_dir / "final_model.pt"
 config_path = data_dir / "config.json"
@@ -96,6 +96,7 @@ def run_inference(branch_input, config_path="config.json", model_path="final_mod
     branch_dim = len(branch_input)
     trunk_dim = 3
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print('Using device:', device)
 
     net = MultiTaskDeepONet(
         layer_sizes_branch=[branch_dim] + branch_layers,
@@ -121,32 +122,43 @@ def run_inference(branch_input, config_path="config.json", model_path="final_mod
     branch_input = np.array(branch_input, dtype=np.float32)
 
     if scaling_method == "standard":
-        branch_mean = np.array(scale_params["branch"]["mean"], dtype=np.float32)
-        branch_std = np.array(scale_params["branch"]["std"], dtype=np.float32)
+        branch_mean = np.array(scale_params["branch_mean"], dtype=np.float32)
+        branch_std = np.array(scale_params["branch_std"], dtype=np.float32)
+        # 防止除零：将 std 为 0 的位置替换为 1
+        branch_std = np.where(branch_std == 0, 1.0, branch_std)
         branch_scaled = (branch_input - branch_mean) / branch_std
 
-        trunk_mean = np.array(scale_params["trunk"]["mean"], dtype=np.float32)
-        trunk_std = np.array(scale_params["trunk"]["std"], dtype=np.float32)
+        trunk_mean = np.array(scale_params["trunk_mean"], dtype=np.float32)
+        trunk_std = np.array(scale_params["trunk_std"], dtype=np.float32)
+        trunk_std = np.where(trunk_std == 0, 1.0, trunk_std)
         X_trunk = (X_trunk - trunk_mean) / trunk_std
     elif scaling_method == "minmax":
-        branch_min = np.array(scale_params["branch"]["min"], dtype=np.float32)
-        branch_max = np.array(scale_params["branch"]["max"], dtype=np.float32)
-        branch_scaled = (branch_input - branch_min) / (branch_max - branch_min)
+        branch_min = np.array(scale_params["branch_min"], dtype=np.float32)
+        branch_max = np.array(scale_params["branch_max"], dtype=np.float32)
+        branch_range = branch_max - branch_min
+        branch_range = np.where(branch_range == 0, 1.0, branch_range)
+        branch_scaled = (branch_input - branch_min) / branch_range
 
-        trunk_min = np.array(scale_params["trunk"]["min"], dtype=np.float32)
-        trunk_max = np.array(scale_params["trunk"]["max"], dtype=np.float32)
-        X_trunk = (X_trunk - trunk_min) / (trunk_max - trunk_min)
+        trunk_min = np.array(scale_params["trunk_min"], dtype=np.float32)
+        trunk_max = np.array(scale_params["trunk_max"], dtype=np.float32)
+        trunk_range = trunk_max - trunk_min
+        trunk_range = np.where(trunk_range == 0, 1.0, trunk_range)
+        X_trunk = (X_trunk - trunk_min) / trunk_range
     else:
         branch_scaled = branch_input
 
+    # 检查缩放后是否有 nan
+    if np.any(np.isnan(branch_scaled)):
+        print(f"[警告] branch_scaled 包含 nan，原始输入范围: [{branch_input.min():.2f}, {branch_input.max():.2f}]")
 
     branch_scaled = branch_scaled.reshape(1, -1)
     branch_tensor = torch.from_numpy(branch_scaled).float().to(device)
     trunk_tensor = torch.from_numpy(X_trunk).float().to(device)
+
     # 6. 推理
     t0 = time.perf_counter()
     with torch.no_grad():
-        outputs = net([branch_tensor, trunk_tensor])  # 返回 dict: {task_name: tensor}
+        outputs = net([branch_tensor, trunk_tensor])
     t1 = time.perf_counter()
     print(f"Inference time: {(t1 - t0) * 1000:.3f} ms")
 
@@ -156,23 +168,33 @@ def run_inference(branch_input, config_path="config.json", model_path="final_mod
         y_scaled = y_scaled_tensor.cpu().numpy()
 
         if scaling_method == "standard":
-            y_mean = np.array(scale_params[task_name]["mean"], dtype=np.float32)
-            y_std = np.array(scale_params[task_name]["std"], dtype=np.float32)
+            y_mean = np.array(scale_params[f'{task_name}_mean'], dtype=np.float32)
+            y_std = np.array(scale_params[f'{task_name}_std'], dtype=np.float32)
             y_pred = y_scaled * y_std + y_mean
         elif scaling_method == "minmax":
-            y_min = np.array(scale_params[task_name]["min"], dtype=np.float32)
-            y_max = np.array(scale_params[task_name]["max"], dtype=np.float32)
+            y_min = np.array(scale_params[f'{task_name}_min'], dtype=np.float32)
+            y_max = np.array(scale_params[f'{task_name}_max'], dtype=np.float32)
             y_pred = y_scaled * (y_max - y_min) + y_min
         else:
             y_pred = y_scaled
 
         results[task_name] = y_pred.flatten().tolist()
 
-    print(f"预测结果: temperature 范围 [{min(results['temperature']):.2f}, {max(results['temperature']):.2f}]")
-    if 'stress' in results:
-        print(f"          stress 范围 [{min(results['stress']):.2f}, {max(results['stress']):.2f}]")
+    # 有效性检查
+    temp_vals = [v for v in results['temperature'] if not np.isnan(v)]
+    if temp_vals:
+        print(f"预测结果: temperature 范围 [{min(temp_vals):.2f}, {max(temp_vals):.2f}]")
+    else:
+        print("预测结果: temperature 全为 nan")
 
-    return results  # {"temperature": [...], "stress": [...]}
+    if 'stress' in results:
+        stress_vals = [v for v in results['stress'] if not np.isnan(v)]
+        if stress_vals:
+            print(f"          stress 范围 [{min(stress_vals):.2f}, {max(stress_vals):.2f}]")
+        else:
+            print("          stress 全为 nan")
+
+    return results
 
 
 task_queue = queue.Queue()

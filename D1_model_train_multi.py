@@ -56,19 +56,7 @@ def save_config(config, exp_dir, scale_params=None):
 
     # 转换 scale_params 中的 numpy 数组为列表
     if scale_params is not None:
-        formatted_params = {}
-        for key, value in scale_params.items():
-            if isinstance(value, dict):
-                formatted_params[key] = {}
-                for k, v in value.items():
-                    if isinstance(v, np.ndarray):
-                        formatted_params[key][k] = v.tolist()
-                    else:
-                        formatted_params[key][k] = v
-            else:
-                formatted_params[key] = value
-        config['scale_params'] = formatted_params
-
+        config['scale_params'] = {k: float(v) for k, v in scale_params.items()}
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
     print(f"配置已保存到: {config_path}")
@@ -288,42 +276,43 @@ class MultiTaskOperatorData:
             self.labels_test = self.labels_test_raw
 
     def _scale_data(self):
-        """数据缩放"""
+        """数据缩放 - 使用numpy计算"""
+        eps = 1e-8  # 防止除零
+
         # Branch输入缩放
         if self.scale_method == 'standard':
-            self.branch_scaler = StandardScaler()
-            self.branch_train = self.branch_scaler.fit_transform(self.branch_train_raw)
-            self.branch_test = self.branch_scaler.transform(self.branch_test_raw)
-            self.scale_params['branch'] = {
-                'type': 'standard', 'mean': self.branch_scaler.mean_, 'std': self.branch_scaler.scale_
-            }
+            branch_mean = np.mean(self.branch_train_raw)
+            branch_std = np.std(self.branch_train_raw) + eps
+            self.branch_train = (self.branch_train_raw - branch_mean) / branch_std
+            self.branch_test = (self.branch_test_raw - branch_mean) / branch_std
+            self.scale_params['branch_mean'] = branch_mean
+            self.scale_params['branch_std'] = branch_std
         elif self.scale_method == 'minmax':
-            self.branch_scaler = MinMaxScaler()
-            self.branch_train = self.branch_scaler.fit_transform(self.branch_train_raw)
-            self.branch_test = self.branch_scaler.transform(self.branch_test_raw)
-            self.scale_params['branch'] = {
-                'type': 'minmax', 'min': self.branch_scaler.data_min_, 'max': self.branch_scaler.data_max_
-            }
-
-        # Trunk输入通常不缩放
-        # self.trunk_train = self.trunk_train_raw
-        # self.trunk_test = self.trunk_test_raw
+            branch_min = np.min(self.branch_train_raw)
+            branch_max = np.max(self.branch_train_raw)
+            branch_range = branch_max - branch_min + eps
+            self.branch_train = (self.branch_train_raw - branch_min) / branch_range
+            self.branch_test = (self.branch_test_raw - branch_min) / branch_range
+            self.scale_params['branch_min'] = branch_min
+            self.scale_params['branch_max'] = branch_max
 
         # Trunk输入缩放
         if self.scale_method == 'standard':
-            self.trunk_scaler = StandardScaler()
-            self.trunk_train = self.trunk_scaler.fit_transform(self.trunk_train_raw)
-            self.trunk_test = self.trunk_scaler.transform(self.trunk_test_raw)
-            self.scale_params['trunk'] = {
-                'type': 'standard', 'mean': self.trunk_scaler.mean_, 'std': self.trunk_scaler.scale_
-            }
+            trunk_mean = np.mean(self.trunk_train_raw)
+            trunk_std = np.std(self.trunk_train_raw) + eps
+            self.trunk_train = (self.trunk_train_raw - trunk_mean) / trunk_std
+            self.trunk_test = (self.trunk_test_raw - trunk_mean) / trunk_std
+            self.scale_params['trunk_mean'] = trunk_mean
+            self.scale_params['trunk_std'] = trunk_std
+
         elif self.scale_method == 'minmax':
-            self.trunk_scaler = MinMaxScaler()
-            self.trunk_train = self.trunk_scaler.fit_transform(self.trunk_train_raw)
-            self.trunk_test = self.trunk_scaler.transform(self.trunk_test_raw)
-            self.scale_params['trunk'] = {
-                'type': 'minmax', 'min': self.trunk_scaler.data_min_, 'max': self.trunk_scaler.data_max_
-            }
+            trunk_min = np.min(self.trunk_train_raw)
+            trunk_max = np.max(self.trunk_train_raw)
+            trunk_range = trunk_max - trunk_min + eps
+            self.trunk_train = (self.trunk_train_raw - trunk_min) / trunk_range
+            self.trunk_test = (self.trunk_test_raw - trunk_min) / trunk_range
+            self.scale_params['trunk_min'] = trunk_min
+            self.scale_params['trunk_max'] = trunk_max
 
         # 标签缩放
         self.labels_train = {}
@@ -333,20 +322,25 @@ class MultiTaskOperatorData:
             y_train_raw = self.labels_train_raw[task_name]
             y_test_raw = self.labels_test_raw[task_name]
 
+            # 展平后计算统计量
+            y_train_flat = y_train_raw.reshape(y_train_raw.shape[0], -1)
+            y_test_flat = y_test_raw.reshape(y_test_raw.shape[0], -1)
+
             if self.scale_method == 'standard':
-                y_scaler = StandardScaler()
-                y_train_scaled = y_scaler.fit_transform(y_train_raw.reshape(y_train_raw.shape[0], -1))
-                y_test_scaled = y_scaler.transform(y_test_raw.reshape(y_test_raw.shape[0], -1))
-                self.scale_params[task_name] = {
-                    'type': 'standard', 'mean': y_scaler.mean_, 'std': y_scaler.scale_
-                }
+                y_mean = np.mean(y_train_flat)
+                y_std = np.std(y_train_flat) + eps
+                y_train_scaled = (y_train_flat - y_mean) / y_std
+                y_test_scaled = (y_test_flat - y_mean) / y_std
+                self.scale_params[f'{task_name}_mean'] = y_mean
+                self.scale_params[f'{task_name}_std'] = y_std
             elif self.scale_method == 'minmax':
-                y_scaler = MinMaxScaler()
-                y_train_scaled = y_scaler.fit_transform(y_train_raw.reshape(y_train_raw.shape[0], -1))
-                y_test_scaled = y_scaler.transform(y_test_raw.reshape(y_test_raw.shape[0], -1))
-                self.scale_params[task_name] = {
-                    'type': 'minmax', 'min': y_scaler.data_min_, 'max': y_scaler.data_max_
-                }
+                y_min = np.min(y_train_flat)
+                y_max = np.max(y_train_flat)
+                y_range = y_max - y_min + eps
+                y_train_scaled = (y_train_flat - y_min) / y_range
+                y_test_scaled = (y_test_flat - y_min) / y_range
+                self.scale_params[f'{task_name}_min'] =y_min
+                self.scale_params[f'{task_name}_max'] =y_max
 
             # 恢复形状
             self.labels_train[task_name] = y_train_scaled.reshape(y_train_raw.shape)
