@@ -7,7 +7,6 @@ import pandas as pd
 import time
 import threading
 import queue
-import queue
 from pathlib import Path
 
 # 修改导入：使用多任务模型
@@ -72,14 +71,13 @@ def compute_heat_flux_realtime(nodes, params):
     return sum_q_values.astype(np.float32)
 
 
-def init_model(config_path, model_path, trunk_net_path):
-    global MODEL, TRUNK_TENSOR, CFG
-
-    # 1. 读配置
+def run_inference(branch_input, config_path="config.json", model_path="final_model.pt"):
+    """
+    执行多任务模型推理，返回温度场和应力场预测结果
+    """
+    # 1. 读取配置
     with open(config_path, "r") as f:
-        CFG = json.load(f)
-
-    cfg = CFG
+        cfg = json.load(f)
     branch_layers = cfg["branch_layers"]
     trunk_layers = cfg["trunk_layers"]
     activation = cfg["activation"]
@@ -87,113 +85,117 @@ def init_model(config_path, model_path, trunk_net_path):
     is_output_activation = cfg["is_output_activation"]
     output_activation = cfg["output_activation"]
     is_bias = cfg["is_bias"]
+    scaling_method = cfg["scaling_method"]
     tasks_config = cfg["tasks_config"]
+    scale_params = cfg.get("scale_params", {})
 
-    # 2. 读 trunk 坐标（只一次）
+    # 2. 读取 trunk 坐标
     trunk_df = pd.read_csv(trunk_net_path, index_col=0)
     X_trunk = trunk_df.to_numpy(dtype=np.float32)
 
-    trunk_dim = X_trunk.shape[1]
+    # 3. 构建多任务模型
+    branch_dim = len(branch_input)
+    trunk_dim = 3
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device)
+    print('Using device:', device)
 
-    # 3. 构建模型（branch_dim 先占位）
-    MODEL = {
-        "net": None,
-        "device": device,
-        "X_trunk_raw": X_trunk
-    }
-
-    # 4. 构建 trunk tensor（常驻）
-    TRUNK_TENSOR = torch.from_numpy(X_trunk).float().to(device)
-
-    # 5. 加载权重（注意：模型结构稍后补）
-    MODEL["state_dict"] = torch.load(
-        model_path,
-        map_location=device,
-        weights_only=True
+    net = MultiTaskDeepONet(
+        layer_sizes_branch=[branch_dim] + branch_layers,
+        layer_sizes_trunk=[trunk_dim] + trunk_layers,
+        activation=activation,
+        kernel_initializer=initializer,
+        tasks_config=tasks_config,
+        is_output_activation=is_output_activation,
+        output_activation=output_activation,
+        multi_output_strategy=cfg.get("multi_output_strategy", "split_branch"),
+        isDropout=False,
+        dropout_rate=0,
+        is_bias=is_bias,
     )
 
-    print("Model initialized")
+    # 4. 加载权重
+    state_dict = torch.load(model_path, map_location=device, weights_only=True)
+    net.load_state_dict(state_dict)
+    net.to(device)
+    net.eval()
 
-def run_inference(branch_input):
-    global MODEL, TRUNK_TENSOR, CFG
-
-    cfg = CFG
-    scaling_method = cfg["scaling_method"]
-    scale_params = cfg.get("scale_params", {})
-
+    # 5. 数据预处理
     branch_input = np.array(branch_input, dtype=np.float32)
 
-    # 1. scaling
     if scaling_method == "standard":
         branch_mean = np.array(scale_params["branch_mean"], dtype=np.float32)
         branch_std = np.array(scale_params["branch_std"], dtype=np.float32)
+        # 防止除零：将 std 为 0 的位置替换为 1
         branch_std = np.where(branch_std == 0, 1.0, branch_std)
         branch_scaled = (branch_input - branch_mean) / branch_std
+
+        trunk_mean = np.array(scale_params["trunk_mean"], dtype=np.float32)
+        trunk_std = np.array(scale_params["trunk_std"], dtype=np.float32)
+        trunk_std = np.where(trunk_std == 0, 1.0, trunk_std)
+        X_trunk = (X_trunk - trunk_mean) / trunk_std
     elif scaling_method == "minmax":
         branch_min = np.array(scale_params["branch_min"], dtype=np.float32)
         branch_max = np.array(scale_params["branch_max"], dtype=np.float32)
-        branch_range = np.where(branch_max - branch_min == 0, 1.0, branch_max - branch_min)
+        branch_range = branch_max - branch_min
+        branch_range = np.where(branch_range == 0, 1.0, branch_range)
         branch_scaled = (branch_input - branch_min) / branch_range
+
+        trunk_min = np.array(scale_params["trunk_min"], dtype=np.float32)
+        trunk_max = np.array(scale_params["trunk_max"], dtype=np.float32)
+        trunk_range = trunk_max - trunk_min
+        trunk_range = np.where(trunk_range == 0, 1.0, trunk_range)
+        X_trunk = (X_trunk - trunk_min) / trunk_range
     else:
         branch_scaled = branch_input
 
+    # 检查缩放后是否有 nan
+    if np.any(np.isnan(branch_scaled)):
+        print(f"[警告] branch_scaled 包含 nan，原始输入范围: [{branch_input.min():.2f}, {branch_input.max():.2f}]")
+
     branch_scaled = branch_scaled.reshape(1, -1)
-
-    device = MODEL["device"]
-
-    # 2. 第一次推理时才真正构建网络
-    if MODEL["net"] is None:
-        branch_dim = branch_scaled.shape[1]
-        trunk_dim = TRUNK_TENSOR.shape[1]
-
-        net = MultiTaskDeepONet(
-            layer_sizes_branch=[branch_dim] + cfg["branch_layers"],
-            layer_sizes_trunk=[trunk_dim] + cfg["trunk_layers"],
-            activation=cfg["activation"],
-            kernel_initializer=cfg["initializer"],
-            tasks_config=cfg["tasks_config"],
-            is_output_activation=cfg["is_output_activation"],
-            output_activation=cfg["output_activation"],
-            multi_output_strategy=cfg.get("multi_output_strategy", "split_branch"),
-            isDropout=False,
-            dropout_rate=0,
-            is_bias=cfg["is_bias"],
-        )
-
-        net.load_state_dict(MODEL["state_dict"])
-        net.to(device)
-        net.eval()
-
-        MODEL["net"] = net
-        print("Network constructed")
-
     branch_tensor = torch.from_numpy(branch_scaled).float().to(device)
+    trunk_tensor = torch.from_numpy(X_trunk).float().to(device)
 
-    # 3. 推理
+    # 6. 推理
+    t0 = time.perf_counter()
     with torch.no_grad():
-        outputs = MODEL["net"]([branch_tensor, TRUNK_TENSOR])
+        outputs = net([branch_tensor, trunk_tensor])
+    t1 = time.perf_counter()
+    print(f"Inference time: {(t1 - t0) * 1000:.3f} ms")
 
-    # 4. 反归一化
+    # 7. 反归一化各任务输出
     results = {}
     for task_name, y_scaled_tensor in outputs.items():
         y_scaled = y_scaled_tensor.cpu().numpy()
 
         if scaling_method == "standard":
-            y_mean = np.array(scale_params[f"{task_name}_mean"], dtype=np.float32)
-            y_std = np.array(scale_params[f"{task_name}_std"], dtype=np.float32)
+            y_mean = np.array(scale_params[f'{task_name}_mean'], dtype=np.float32)
+            y_std = np.array(scale_params[f'{task_name}_std'], dtype=np.float32)
             y_pred = y_scaled * y_std + y_mean
         elif scaling_method == "minmax":
-            y_min = np.array(scale_params[f"{task_name}_min"], dtype=np.float32)
-            y_max = np.array(scale_params[f"{task_name}_max"], dtype=np.float32)
+            y_min = np.array(scale_params[f'{task_name}_min'], dtype=np.float32)
+            y_max = np.array(scale_params[f'{task_name}_max'], dtype=np.float32)
             y_pred = y_scaled * (y_max - y_min) + y_min
         else:
             y_pred = y_scaled
 
         results[task_name] = y_pred.flatten().tolist()
-    return results
 
+    # 有效性检查
+    temp_vals = [v for v in results['temperature'] if not np.isnan(v)]
+    if temp_vals:
+        print(f"预测结果: temperature 范围 [{min(temp_vals):.2f}, {max(temp_vals):.2f}]")
+    else:
+        print("预测结果: temperature 全为 nan")
+
+    if 'stress' in results:
+        stress_vals = [v for v in results['stress'] if not np.isnan(v)]
+        if stress_vals:
+            print(f"          stress 范围 [{min(stress_vals):.2f}, {max(stress_vals):.2f}]")
+        else:
+            print("          stress 全为 nan")
+
+    return results
 
 
 task_queue = queue.Queue()
@@ -202,10 +204,6 @@ task_queue = queue.Queue()
 def handle_message(msg, conn):
     # 移除 #END# 后缀
     msg = msg.replace("#END#", "").strip()
-
-    if msg == "ping":
-        conn.send(b"pong\n")
-        return
 
     if not msg.startswith("fea"):
         return
@@ -220,9 +218,7 @@ def inference_worker():
     while True:
         params, conn = task_queue.get()
         heat_density = compute_heat_flux_realtime(nodes, params)
-        print('heat_density',heat_density[:5])  # 打印前5个值以供调试
-        results = run_inference(heat_density)
-        print(results['temperature'][:5])  # 打印前5个值以供调试
+        results = run_inference(heat_density, config_path=config_path, model_path=model_path)
         # 发送包含多任务结果的 JSON
         send_str = json.dumps(results) + "\n"
         conn.send(send_str.encode("utf-8"))
@@ -273,12 +269,5 @@ def run_server():
 
 
 if __name__ == "__main__":
-    init_model(
-        config_path=config_path,
-        model_path=model_path,
-        trunk_net_path=trunk_net_path
-    )
-
     threading.Thread(target=inference_worker, daemon=True).start()
     run_server()
-

@@ -20,8 +20,8 @@ data_dir = Path(r'D:\Users\MXY\PycharmProjects\data')
 # 1. 加载 PyTorch 模型
 ############################################
 # 注意：必须是 torch.save(model) 保存的方式
-model_path = data_dir/"final_model.pt"
-config_path= data_dir/"config.json"
+model_path = data_dir/"t1s1/final_model.pt"
+config_path= data_dir/"t1s1/config.json"
 trunk_net_path= data_dir/"t1s1/sampled_trunk_net.csv"
 nodes_path=data_dir/ "t1s1/sampled_nodes.csv"
 
