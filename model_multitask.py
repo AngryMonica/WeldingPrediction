@@ -255,11 +255,11 @@ class MultiTaskOperatorData:
 
         # 原始数据
         self.branch_train_raw = self.branch_input[train_idx]
-        self.trunk_train_raw = self.trunk_input[train_idx]
+        self.trunk_train_raw = self.trunk_input
         self.labels_train_raw = {task: labels[train_idx] for task, labels in self.labels_dict.items()}
 
         self.branch_test_raw = self.branch_input[test_idx]
-        self.trunk_test_raw = self.trunk_input[test_idx]
+        self.trunk_test_raw = self.trunk_input
         self.labels_test_raw = {task: labels[test_idx] for task, labels in self.labels_dict.items()}
 
         self.scale_params = {}

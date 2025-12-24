@@ -41,7 +41,7 @@ def double_ellipsoid_heat_source(X, Y, Z, params):
         print(f"[警告] 参数异常: v={v}, a1={a1}, a2={a2}, b={b}, c={c}, I={I}, U={U}, eta={eta}")
         return np.full_like(X, np.nan, dtype=float)
 
-    Q = eta * I * U
+    Q = eta * I * U / v
 
     # 坐标变换（向量化）
     Xc = X - xc

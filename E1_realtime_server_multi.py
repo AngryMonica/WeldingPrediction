@@ -40,6 +40,7 @@ q_values_list = []
 
 
 def double_ellipsoid_heat_source(X, Y, Z, params):
+
     I, U, v = params[0], params[1], params[2]
     xc, yc, zc = params[3], params[4], params[5]
     a1, a2, b, c = params[6], params[7], params[8], params[9]
@@ -62,6 +63,15 @@ def double_ellipsoid_heat_source(X, Y, Z, params):
 
 def compute_heat_flux_realtime(nodes, params):
     X, Y, Z = nodes.T
+
+    if params[0]=="reset":
+        isReset=True
+        params.pop(0)
+    else:
+        isReset=False
+    params=[float(p) for p in params]
+    if isReset:
+        q_values_list.clear()
     q_values = double_ellipsoid_heat_source(X, Y, Z, params)
 
     if len(q_values_list) >= 10:
@@ -79,19 +89,26 @@ def init_model(config_path, model_path, trunk_net_path):
     with open(config_path, "r") as f:
         CFG = json.load(f)
 
-    cfg = CFG
-    branch_layers = cfg["branch_layers"]
-    trunk_layers = cfg["trunk_layers"]
-    activation = cfg["activation"]
-    initializer = cfg["initializer"]
-    is_output_activation = cfg["is_output_activation"]
-    output_activation = cfg["output_activation"]
-    is_bias = cfg["is_bias"]
-    tasks_config = cfg["tasks_config"]
+    cfg=CFG
+    scaling_method=cfg["scaling_method"]
+    scale_params=cfg.get("scale_params", {})
 
     # 2. 读 trunk 坐标（只一次）
     trunk_df = pd.read_csv(trunk_net_path, index_col=0)
     X_trunk = trunk_df.to_numpy(dtype=np.float32)
+
+    if scaling_method == "standard":
+        trunk_mean = np.array(scale_params["trunk_mean"], dtype=np.float32)
+        trunk_std = np.array(scale_params["trunk_std"], dtype=np.float32)
+        trunk_std = np.where(trunk_std == 0, 1.0, trunk_std)
+        trunk_scaled = (X_trunk - trunk_mean) / trunk_std
+    elif scaling_method == "minmax":
+        trunk_min = np.array(scale_params["trunk_min"], dtype=np.float32)
+        trunk_max = np.array(scale_params["trunk_max"], dtype=np.float32)
+        trunk_range = np.where(trunk_max - trunk_min == 0, 1.0, trunk_max - trunk_min)
+        trunk_scaled = (X_trunk - trunk_min) / trunk_range
+    else:
+        trunk_scaled = X_trunk
 
     trunk_dim = X_trunk.shape[1]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,12 +117,11 @@ def init_model(config_path, model_path, trunk_net_path):
     # 3. 构建模型（branch_dim 先占位）
     MODEL = {
         "net": None,
-        "device": device,
-        "X_trunk_raw": X_trunk
+        "device": device
     }
 
     # 4. 构建 trunk tensor（常驻）
-    TRUNK_TENSOR = torch.from_numpy(X_trunk).float().to(device)
+    TRUNK_TENSOR = torch.from_numpy(trunk_scaled).float().to(device)
 
     # 5. 加载权重（注意：模型结构稍后补）
     MODEL["state_dict"] = torch.load(
@@ -211,8 +227,7 @@ def handle_message(msg, conn):
         return
 
     msg = msg.replace("fea,", "")
-    items = msg.split(",")
-    params = [float(x) for x in items]
+    params = msg.split(",")
     task_queue.put((params, conn))
 
 

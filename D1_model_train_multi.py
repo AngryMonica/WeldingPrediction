@@ -256,11 +256,11 @@ class MultiTaskOperatorData:
 
         # 原始数据
         self.branch_train_raw = self.branch_input[train_idx]
-        self.trunk_train_raw = self.trunk_input[train_idx]
+        self.trunk_train_raw = self.trunk_input
         self.labels_train_raw = {task: labels[train_idx] for task, labels in self.labels_dict.items()}
 
         self.branch_test_raw = self.branch_input[test_idx]
-        self.trunk_test_raw = self.trunk_input[test_idx]
+        self.trunk_test_raw = self.trunk_input
         self.labels_test_raw = {task: labels[test_idx] for task, labels in self.labels_dict.items()}
 
         self.scale_params = {}
@@ -426,22 +426,12 @@ class MultiTaskDeepONet(dde.nn.DeepONetCartesianProd):
         if is_bias:
             self.output_bias = nn.Parameter(torch.tensor(init_bias, dtype=torch.float32))
 
-        self._setup_task_indices()
-
     def _get_activation(self, name):
         activations = {
             "relu": nn.ReLU(), "softplus": nn.Softplus(), "sigmoid": nn.Sigmoid(),
             "tanh": nn.Tanh(), "elu": nn.ELU(), "gelu": nn.GELU(), "linear": lambda x: x
         }
         return activations.get(name.lower(), nn.ReLU())
-
-    def _setup_task_indices(self):
-        self.task_output_indices = {}
-        start_idx = 0
-        for task_name, config in self.tasks_config.items():
-            output_dim = config['output_dim']
-            self.task_output_indices[task_name] = slice(start_idx, start_idx + output_dim)
-            start_idx += output_dim
 
     def forward(self, inputs):
         x_func, x_loc = inputs[0], inputs[1]
@@ -462,8 +452,8 @@ class MultiTaskDeepONet(dde.nn.DeepONetCartesianProd):
 
         # 分割输出
         outputs = {}
-        for task_name, output_slice in self.task_output_indices.items():
-            outputs[task_name] = x[..., output_slice]
+        for i,task_name in enumerate(self.tasks_config.keys()):
+            outputs[task_name] = x[:,:,i]
 
         if self._output_transform is not None:
             outputs = self._output_transform(inputs, outputs)
@@ -494,7 +484,6 @@ class MultiTaskLoss(nn.Module):
                 weight = self.tasks_config[task_name].get('loss_weight', 1.0)
                 total_loss += weight * loss
                 task_losses[task_name] = loss.item()
-
         return total_loss, task_losses
 
 
@@ -531,7 +520,7 @@ class MultiTaskTrainer:
         }
         generator = torch.Generator(device=self.device)  # 确保生成器的设备与模型一致
 
-        dataset = TensorDataset(branch_tensor, trunk_tensor, *labels_tensor.values())
+        dataset = TensorDataset(branch_tensor, *labels_tensor.values())
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator)
 
         # 训练循环
@@ -541,12 +530,18 @@ class MultiTaskTrainer:
             epoch_task_losses = {task: 0 for task in self.model.task_names}
 
             for batch in dataloader:
-                branch_batch, trunk_batch, *label_batches = batch
+                branch_batch, *label_batches = batch
                 labels_batch = {
                     task: label_batches[i] for i, task in enumerate(self.model.task_names)
                 }
 
-                predictions = self.model([branch_batch, trunk_batch])
+                predictions = self.model([branch_batch, trunk_tensor])
+                for task in self.model.task_names:
+                    if predictions[task].shape != labels_batch[task].shape:
+                        print('predictions[task].shape:',predictions[task].shape)
+                        print('labels_batch[task].shape:',labels_batch[task].shape)
+                        predictions[task] = predictions[task].squeeze(-1)  # 移除最后一维
+
                 total_loss, task_losses = self.loss_fn(predictions, labels_batch)
 
                 self.optimizer.zero_grad()
@@ -618,7 +613,7 @@ def main():
 
     # 创建模型
     branch_dim = data.branch_train.shape[1]
-    trunk_dim = data.trunk_train.shape[-1]  # 坐标维度
+    trunk_dim = data.trunk_train.shape[1]  # 坐标维度
 
     model = MultiTaskDeepONet(
         layer_sizes_branch=[branch_dim] + args.branch_layers,
